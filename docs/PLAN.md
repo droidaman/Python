@@ -102,6 +102,8 @@ flowchart TD
 | `data/` | Provider protocol (splits, share counts, quality flags), CSV format, synthetic generator. |
 | `data/edgar.py` | SEC EDGAR client and XBRL → point-in-time annual reports (§12). |
 | `data/live.py` | Builds the live dataset from EDGAR + IB prices, with split-safety flags (§12). |
+| `data/norgate.py` | Builds the backtest dataset from EDGAR + Norgate Data, incl. delisted stocks (§13). |
+| `data/rates.py` | Historical 3-month T-bill rates (FRED TB3MS), used only once published. |
 | `ibkr.py` | Interactive Brokers paper-only broker, ledger and gateway over `ib_async` (§12). |
 | `net.py` | Rate-limited, retrying, cached HTTPS JSON client (standard library). |
 | `journal.py` | Append-only JSON Lines decision journal. |
@@ -261,12 +263,13 @@ caps.
 
 ## 9. Validation protocol (before any real money)
 
-1. **Data:** a point-in-time fundamentals source with filing dates (SEC EDGAR XBRL "company facts"
-   gives filing dates for free) plus a price source that **includes delisted securities** (e.g. CRSP,
-   Sharadar or Norgate). Spot-check 50 companies by hand against filings.
-2. **Backtest** 2000–present, monthly marks, quarterly rebalances, real costs. Report CAGR, volatility,
-   Sharpe, maximum drawdown, beta and Jensen's alpha against both the S&P 500 and a small/mid-cap value
-   index.
+1. **Data:** SEC EDGAR XBRL fundamentals (with filing dates) plus Norgate Data prices, which **include
+   delisted securities** (§13). Spot-check 50 companies by hand against their filings, and read the
+   coverage report: what share of delisted stocks made it into the dataset?
+2. **Backtest** from about 2014 (XBRL financials start in 2009–2011, and the rules need five years of
+   them), monthly marks, quarterly rebalances, real costs, historical T-bill rates. Report CAGR,
+   volatility, Sharpe, maximum drawdown, beta and Jensen's alpha against the S&P 500 total return. Run it
+   with a delisting haircut of both 0% and 30% to bracket the effect of delistings.
 3. **Robustness, not optimisation:** perturb every parameter ±20% one at a time. A real effect degrades
    gracefully, while one that depends on a single magic number is rejected.
 4. **Sub-period stability:** results by 5-year window and by market regime; expect and document the
@@ -283,7 +286,7 @@ caps.
 | 0 | This plan | done |
 | 1 | Core engine: gates, ranking, exits, order gates, paper broker, backtester, journal, CSV/synthetic data, tests | done |
 | 2 | SEC EDGAR fundamentals (point-in-time) + Interactive Brokers paper trading, with split-safety checks (§12) | **done** |
-| 3 | Research validation per §9. Needs a historical price source with unadjusted prices, splits and delisted stocks; IB provides none of these (§12) | next: choose a price source |
+| 3 | Research validation per §9, on SEC EDGAR + Norgate Data (§13) | tooling **done**; the research runs are next (on a Windows PC with Norgate) |
 | 4 | Paper trading for 6–12 months: scheduled runs, alerts for FREEZE/HALT, monthly review of the journal | can start now, in parallel with Phase 3 |
 | 5 | Live trading behind human approval of each order batch; tax-lot awareness | after Phases 3 and 4 |
 
@@ -338,9 +341,8 @@ dividend history and no delisted stocks. That's fine for trading today, but it h
      re-adjusted for a new split. The flag stays open until the company files a newer share count.
    * *Unexplained jumps:* a 3× day-over-day move.
 2. **No backtests on IB data.** A dataset built from IB prices is marked `purpose: live` and the backtester
-   refuses it. Phase 3 needs a source with unadjusted prices, splits and delisted stocks (e.g. Norgate Data,
-   Sharadar via Nasdaq Data Link, or CRSP) loaded into the CSV format, including `splits.csv`. The engine
-   already handles splits correctly in backtests: share counts are rescaled to each date's basis, and
+   refuses it. Backtests use Norgate Data instead (§13), which has unadjusted prices, splits and delisted
+   stocks. The engine handles splits in backtests: share counts are rescaled to each date's basis, and
    holdings split with cash in lieu.
 
 To keep IB request volumes reasonable, `build-dataset` evaluates every gate that needs no market data first
@@ -360,3 +362,22 @@ the full pipeline too, so this skips work without changing any decision.
 | Calendar | `paper-trade` refuses to send orders outside the rebalance months; `--dry-run` previews at any time. |
 | Freshness | `paper-trade` refuses a dataset older than one day. |
 | Kill switch | If the file `KILL_SWITCH` exists, the run halts before anything is sent. |
+
+## 13. Historical data: SEC EDGAR + Norgate Data (Phase 3)
+
+`build-history` (`data/norgate.py`) builds the research dataset that `backtest` runs on. It needs a Norgate
+Data US Stocks subscription at **Platinum or Diamond** level (for delisted stocks and listing history), the
+Norgate Data Updater running on **Windows**, and `pip install norgatedata`.
+
+| Concern | How it is handled |
+|---|---|
+| Survivorship bias | Reads both "US Equities" and "US Equities Delisted". The coverage report states what share of delisted stocks in scope made it into the dataset, and the backtest prints it beside the results. |
+| Which company is a delisted ticker? | The SEC maps only *current* tickers to companies. Delisted stocks are matched by normalised company name against every name ever filed with the SEC, and accepted only if the name is unique **and** verified: the company's 10-Ks fall within the stock's trading life, and price × share count is consistent with the public float the company reported (0.8–50×). Otherwise the stock is excluded, never guessed. |
+| Splits | Prices are stored unadjusted. Each capital event's ratio is the step change in (unadjusted ÷ capital-adjusted close), which captures splits, reverse splits, bonus issues and stock dividends exactly. |
+| Listing status | Norgate's daily major-exchange flag: days on the OTC market are dropped, so a move to OTC is a delisting. |
+| Delisting returns | A holding that delists is closed at its last price minus a haircut (default 30%, Shumway 1997). Takeovers usually deliver close to the last price, so also run with `--delisting-haircut 0` and report both. |
+| Share-count errors | The public-float check runs for every 10-K. A failure flags that company from the 10-K's filing date until the next one, blocking buys and freezing holdings in that period. |
+| Risk-free rate | FRED TB3MS (3-month T-bill), used only once published (a month's average counts from early the following month). |
+| Benchmark | Norgate's S&P 500 total-return index (`$SPXTR`); without it, an equal-weight index of the dataset's universe. |
+| Classification | Sector comes from the SEC's SIC code in both backtests and live trading, so the backtest tests exactly the rules that trade. |
+| Size | Daily data is stored as month-end bars (the backtest is monthly), each carrying the month's average daily dollar volume and its dividends. Report versions that only repeat earlier figures are dropped. |

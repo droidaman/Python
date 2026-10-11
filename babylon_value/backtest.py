@@ -77,11 +77,9 @@ def run_backtest(
     journal: Journal | None = None,
 ) -> BacktestResult:
     config.validate()
-    metadata = getattr(provider, "metadata", {})
-    if metadata.get("purpose") == "live" or metadata.get("price_basis") == "split_adjusted":
-        raise ValueError("this dataset's prices are split-adjusted to its build date, so historical market caps "
-                         "would be wrong around every split; it is for live trading only. Backtests need "
-                         "unadjusted prices plus a splits file.")
+    problem = backtest_problem(provider)
+    if problem:
+        raise ValueError(problem)
     if not 0.0 <= delisting_haircut <= 1.0:
         raise ValueError("delisting_haircut must be in [0, 1]")
     broker = PaperBroker(initial_cash, CostModel(config.costs))
@@ -126,6 +124,15 @@ def run_backtest(
     result.costs_paid = sum(f.cost for f in broker.fills)
     result.metrics = performance_metrics(result)
     return result
+
+
+def backtest_problem(provider) -> str | None:
+    metadata = getattr(provider, "metadata", {})
+    if metadata.get("purpose") == "live" or metadata.get("price_basis") == "split_adjusted":
+        return ("this dataset's prices are split-adjusted to its build date, so historical market caps would be "
+                "wrong around every split; it is for live trading only. Backtests need unadjusted prices plus a "
+                "splits file (see build-history).")
+    return None
 
 
 def performance_metrics(result: BacktestResult, periods_per_year: int = 12) -> dict[str, float]:

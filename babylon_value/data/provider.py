@@ -88,6 +88,8 @@ class InMemoryProvider:
         share_counts: Mapping[str, Sequence[ShareCount]] | None = None,
         quality_flags: Mapping[str, Sequence[QualityFlag]] | None = None,
         metadata: Mapping | None = None,
+        risk_free: Sequence[tuple[date, float]] | None = None,
+        benchmark: Sequence[tuple[date, float]] | None = None,
         adv_window_days: int = 90,
         listing_grace_days: int = 7,
     ):
@@ -98,7 +100,10 @@ class InMemoryProvider:
         self.share_counts = {t: sorted(c, key=lambda x: (x.as_of, x.available_date)) for t, c in (share_counts or {}).items()}
         self.quality_flags = {t: list(flags) for t, flags in (quality_flags or {}).items()}
         self.metadata = dict(metadata or {})
+        self.risk_free = sorted(risk_free or [])           # (month start, rate) - see data/rates.py
+        self.benchmark = sorted(benchmark or [])           # (date, total-return index level)
         self._dates = {t: [b.date for b in bars] for t, bars in self.bars.items()}
+        self._benchmark_dates = [d for d, _ in self.benchmark]
         self._adv_window = timedelta(days=adv_window_days)
         self._grace = listing_grace_days
 
@@ -174,6 +179,17 @@ class InMemoryProvider:
         )
         return SecuritySnapshot(profile=profile, market=market, history=history,
                                 quality_flags=self.active_flags(ticker, as_of))
+
+    def benchmark_return(self, start: date, end: date) -> float | None:
+        """Return of the stored benchmark index between the last levels on or
+        before each date; None without a benchmark or a recent level."""
+        levels = []
+        for day in (start, end):
+            index = bisect_right(self._benchmark_dates, day)
+            if not index or (day - self._benchmark_dates[index - 1]).days > self._grace:
+                return None
+            levels.append(self.benchmark[index - 1][1])
+        return levels[1] / levels[0] - 1 if levels[0] > 0 else None
 
     def _adv(self, ticker: str, as_of: date) -> float:
         dates = self._dates[ticker]

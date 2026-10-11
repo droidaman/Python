@@ -45,6 +45,7 @@ from ..net import FileCache, JsonClient, RateLimiter, Transport
 from .provider import ShareCount
 
 TICKERS_URL = "https://www.sec.gov/files/company_tickers_exchange.json"
+NAMES_URL = "https://www.sec.gov/Archives/edgar/cik-lookup-data.txt"   # every entity name, past and present
 SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik:010d}.json"
 FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
 
@@ -186,6 +187,12 @@ class SecClient:
                                             str(row[index["exchange"]] or "")))
         return records
 
+    def entity_names(self, max_age: float = 30 * 86_400) -> dict[str, frozenset[int]]:
+        """Normalised company name -> CIKs, from every name any filer has used.
+        Used to find delisted companies, whose tickers the SEC no longer maps."""
+        body = self._http.get_bytes(NAMES_URL, max_age) or b""
+        return parse_entity_names(body.decode("latin-1"))
+
     def submissions(self, cik: int, max_age: float = 86_400) -> dict | None:
         return self._http.get_json(SUBMISSIONS_URL.format(cik=cik), max_age)
 
@@ -199,16 +206,59 @@ def normalize_exchange(name: str) -> str:
     return _EXCHANGES.get((name or "").strip().lower(), (name or "").strip())
 
 
-def profile_from_submissions(ticker: str, exchange: str, submissions: Mapping) -> SecurityProfile:
+@dataclass(frozen=True)
+class CompanyFacts:
+    name: str
+    sector: str
+    country: str
+    operating: bool
+
+
+def company_from_submissions(submissions: Mapping) -> CompanyFacts:
     sic_text = str(submissions.get("sic") or "")
-    sector = sic_sector(int(sic_text)) if sic_text.isdigit() else ""
     address = (submissions.get("addresses") or {}).get("business") or {}
     state = str(address.get("stateOrCountry") or "").upper()
-    country = "US" if state in US_STATES else (state or "unknown")
-    operating = submissions.get("entityType") == "operating"
-    security_type = "common_stock" if operating and PLAIN_TICKER.match(ticker) else "other"
-    return SecurityProfile(ticker, str(submissions.get("name") or ticker), sector, normalize_exchange(exchange),
-                           security_type, country)
+    return CompanyFacts(
+        name=str(submissions.get("name") or ""),
+        sector=sic_sector(int(sic_text)) if sic_text.isdigit() else "",
+        country="US" if state in US_STATES else (state or "unknown"),
+        operating=submissions.get("entityType") == "operating",
+    )
+
+
+def profile_from_submissions(ticker: str, exchange: str, submissions: Mapping) -> SecurityProfile:
+    company = company_from_submissions(submissions)
+    security_type = "common_stock" if company.operating and PLAIN_TICKER.match(ticker) else "other"
+    return SecurityProfile(ticker, company.name or ticker, company.sector, normalize_exchange(exchange),
+                           security_type, company.country)
+
+
+_NAME_WORDS = {"INCORPORATED": "INC", "CORPORATION": "CORP", "COMPANY": "CO", "LIMITED": "LTD", "&": "AND"}
+_NAME_NOISE = frozenset({"THE", "COMMON", "STOCK", "SHARES", "SHS", "ORDINARY", "ORD", "NEW", "CLASS", "CL"})
+
+
+def normalize_company_name(name: str) -> str:
+    """Upper case, no punctuation, standard suffixes, no share-class words:
+    'General Electric Co Common' and 'GENERAL ELECTRIC CO' both become
+    'GENERAL ELECTRIC CO'."""
+    text = re.sub(r"[^A-Z0-9& ]+", " ", (name or "").upper().replace("&", " & "))
+    words = [_NAME_WORDS.get(w, w) for w in text.split()]
+    words = [w for w in words if w not in _NAME_NOISE]
+    while words and len(words[-1]) == 1:   # trailing share-class letters: "... CLASS A"
+        words.pop()
+    return " ".join(words)
+
+
+def parse_entity_names(text: str) -> dict[str, frozenset[int]]:
+    """Lines look like 'GENERAL ELECTRIC CO:0000040545:'."""
+    names: dict[str, set[int]] = defaultdict(set)
+    for line in text.splitlines():
+        parts = line.rstrip().rstrip(":").rsplit(":", 1)
+        if len(parts) == 2 and parts[1].strip().isdigit():
+            key = normalize_company_name(parts[0])
+            if key:
+                names[key].add(int(parts[1]))
+    return {key: frozenset(ciks) for key, ciks in names.items()}
 
 
 def sic_sector(sic: int) -> str:
@@ -318,10 +368,20 @@ def parse_annual_reports(company_facts: Mapping) -> list[FinancialPeriod]:
     periods = []
     for year_end in sorted(reported):
         merged: dict[str, object] = {}
+        previous = None
         for accession in sorted(reported[year_end], key=lambda a: (filed[a], a)):
             merged.update(reported[year_end][accession])
-            periods.append(_period(year_end, filed[accession], merged))
+            period = _period(year_end, filed[accession], merged)
+            # A later filing that only repeats the same figures adds nothing.
+            if previous is None or _figures(period) != _figures(previous):
+                periods.append(period)
+                previous = period
     return periods
+
+
+def _figures(period: FinancialPeriod) -> tuple:
+    return tuple("nan" if isinstance(v, float) and math.isnan(v) else v
+                 for k, v in vars(period).items() if k != "available_date")
 
 
 def _period(year_end: date, available: date, values: Mapping[str, object]) -> FinancialPeriod:

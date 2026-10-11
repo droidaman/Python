@@ -7,6 +7,9 @@ Research
     python -m babylon_value backtest --data DIR --start YYYY-MM-DD --end YYYY-MM-DD
     python -m babylon_value export-synthetic --out DIR
 
+Historical data (SEC EDGAR + Norgate Data, Windows with the Norgate Data Updater)
+    python -m babylon_value build-history --out DIR --start YYYY-MM-DD
+
 Paper trading (SEC EDGAR + Interactive Brokers paper account)
     python -m babylon_value build-dataset --out DIR
     python -m babylon_value paper-trade   --data DIR --risk-free 0.04 [--dry-run]
@@ -20,7 +23,7 @@ import os
 from datetime import date
 from pathlib import Path
 
-from .backtest import equal_weight_benchmark, run_backtest
+from .backtest import backtest_problem, equal_weight_benchmark, run_backtest
 from .config import StrategyConfig
 from .costs import CostModel
 from .data.csv_io import export_csv_directory, load_csv_directory
@@ -71,8 +74,23 @@ def main(argv: list[str] | None = None) -> int:
     backtest.add_argument("--end", required=True, type=date.fromisoformat)
     backtest.add_argument("--initial-cash", type=float, default=100_000.0)
     backtest.add_argument("--contribution", type=float, default=0.0)
-    backtest.add_argument("--risk-free", type=float, default=0.04)
+    backtest.add_argument("--risk-free", type=float,
+                          help="constant risk-free rate; only used when the dataset has no risk_free.csv")
+    backtest.add_argument("--delisting-haircut", type=float, default=0.30,
+                          help="loss applied when a holding delists (default 0.30; also try 0 to bracket the result)")
     backtest.add_argument("--journal")
+
+    history = commands.add_parser("build-history", help="build a backtest dataset from SEC EDGAR and Norgate Data")
+    history.add_argument("--out", default="data/history")
+    history.add_argument("--start", type=date.fromisoformat, default=date(2012, 1, 1),
+                         help="first date of the backtest window (XBRL financials begin around 2009-2011)")
+    history.add_argument("--end", type=date.fromisoformat, default=date.today())
+    history.add_argument("--sec-user-agent", default=os.environ.get("SEC_USER_AGENT"))
+    history.add_argument("--cache-dir", default=".cache/sec")
+    history.add_argument("--tickers", help="comma-separated tickers to restrict the build (for testing)")
+    history.add_argument("--limit", type=int, help="include at most this many listings (for testing)")
+    history.add_argument("--no-delisted", action="store_true", help="omit delisted stocks (introduces survivorship bias)")
+    history.add_argument("--benchmark", default="$SPXTR", help="Norgate index symbol for the benchmark")
 
     export = commands.add_parser("export-synthetic", help="write a synthetic market as CSV files")
     export.add_argument("--out", required=True)
@@ -112,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
     config = StrategyConfig().validate()
     handlers = {"demo": _demo, "screen": _screen, "explain": _explain, "backtest": _backtest,
                 "export-synthetic": _export, "build-dataset": _build_dataset, "paper-trade": _paper_trade,
-                "reconcile": _reconcile}
+                "reconcile": _reconcile, "build-history": _build_history}
     return handlers[args.command](args, config)
 
 
@@ -183,16 +201,60 @@ def _explain(args, config: StrategyConfig) -> int:
 
 
 def _backtest(args, config: StrategyConfig) -> int:
+    from .data.rates import RiskFreeCurve
+
     provider = load_csv_directory(args.data)
+    problem = backtest_problem(provider)
+    if problem:
+        print(f"refused: {problem}")
+        return 1
+    if provider.risk_free:
+        risk_free = RiskFreeCurve(provider.risk_free).rate_at
+    elif args.risk_free is not None:
+        risk_free = args.risk_free
+    else:
+        print("refused: the dataset has no risk_free.csv; pass a constant with --risk-free")
+        return 1
+    benchmark = provider.benchmark_return if provider.benchmark else equal_weight_benchmark(provider)
     try:
         result = run_backtest(provider, config, args.start, args.end, initial_cash=args.initial_cash,
-                              monthly_contribution=args.contribution, risk_free_rate=args.risk_free,
-                              benchmark=equal_weight_benchmark(provider),
+                              monthly_contribution=args.contribution, risk_free_rate=risk_free,
+                              benchmark=benchmark, delisting_haircut=args.delisting_haircut,
                               journal=JsonlJournal(args.journal) if args.journal else None)
     except ValueError as exc:
         print(f"refused: {exc}")
         return 1
     print(result.summary())
+    coverage = provider.metadata.get("delisted_coverage")
+    if coverage is not None:
+        print(f"  Delisted stocks covered by the dataset: {coverage:.0%}"
+              + ("" if coverage >= 0.9 else " - the rest are missing, which can flatter these results"))
+    print(f"  Benchmark: {provider.metadata.get('sources', {}).get('benchmark', 'equal-weight universe')}")
+    return 0
+
+
+def _build_history(args, config: StrategyConfig) -> int:
+    from .data.edgar import SecClient
+    from .data.norgate import NorgateDataSource, build_history_dataset
+    from .data.rates import FRED_TB3MS_URL, parse_fred_csv
+    from .net import HttpError, JsonClient, RateLimiter
+
+    if not args.sec_user_agent:
+        print("refused: the SEC requires a User-Agent with your name and email; pass --sec-user-agent "
+              "'Jane Doe jane@example.com' or set SEC_USER_AGENT")
+        return 1
+    sec = SecClient(args.sec_user_agent, args.cache_dir)
+    try:
+        body = JsonClient({"User-Agent": args.sec_user_agent}, RateLimiter(1.0)).get_bytes(FRED_TB3MS_URL)
+        rates = parse_fred_csv((body or b"").decode("utf-8"))
+    except HttpError as exc:
+        print(f"warning: could not fetch T-bill rates from FRED ({exc}); backtests will need --risk-free")
+        rates = []
+    tickers = {t.strip().upper() for t in args.tickers.split(",")} if args.tickers else None
+    summary = build_history_dataset(sec, NorgateDataSource(), args.out, args.start, args.end, config,
+                                    symbols=tickers, limit=args.limit, include_delisted=not args.no_delisted,
+                                    benchmark_symbol=args.benchmark or None, risk_free=rates, log=print)
+    print(summary.text())
     return 0
 
 

@@ -12,6 +12,8 @@ Optional:
   shares.csv         ticker,as_of,available_date,shares   (e.g. 10-Q cover counts)
   quality_flags.csv  ticker,start,end,reason         (empty end = still open)
   dataset.json       metadata: purpose, price basis, sources, build date
+  risk_free.csv      date,rate      monthly 3-month T-bill rate as a decimal (data/rates.py)
+  benchmark.csv      date,level     benchmark total-return index
 
 An empty fundamental or price cell is loaded as NaN - never as zero - so the
 integrity gates reject the security instead of trusting a guess. An empty
@@ -36,6 +38,8 @@ FUNDAMENTAL_COLUMNS = ("ticker",) + tuple(f.name for f in fields(FinancialPeriod
 SPLIT_COLUMNS = ("ticker", "ex_date", "ratio")
 SHARE_COLUMNS = ("ticker", "as_of", "available_date", "shares")
 FLAG_COLUMNS = ("ticker", "start", "end", "reason")
+RATE_COLUMNS = ("date", "rate")
+BENCHMARK_COLUMNS = ("date", "level")
 _DATE_FIELDS = ("fiscal_year_end", "available_date")
 
 
@@ -82,10 +86,15 @@ def load_csv_directory(directory: str | Path) -> InMemoryProvider:
         flags.setdefault(row["ticker"], []).append(QualityFlag(
             _date(row["start"], "start", line), _date(end, "end", line) if end else None, row["reason"]))
 
+    risk_free = [(_date(row["date"], "date", line), _number(row["rate"], "rate", line))
+                 for line, row in _read_optional(directory / "risk_free.csv", RATE_COLUMNS)]
+    benchmark = [(_date(row["date"], "date", line), _number(row["level"], "level", line))
+                 for line, row in _read_optional(directory / "benchmark.csv", BENCHMARK_COLUMNS)]
+
     metadata_path = directory / "dataset.json"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
     return InMemoryProvider(profiles, fundamentals, prices, splits=splits, share_counts=share_counts,
-                            quality_flags=flags, metadata=metadata)
+                            quality_flags=flags, metadata=metadata, risk_free=risk_free, benchmark=benchmark)
 
 
 def export_csv_directory(provider: InMemoryProvider, directory: str | Path) -> None:
@@ -108,6 +117,9 @@ def export_csv_directory(provider: InMemoryProvider, directory: str | Path) -> N
     _write(directory / "quality_flags.csv", FLAG_COLUMNS,
            ([t, f.start.isoformat(), f.end.isoformat() if f.end else "", f.reason]
             for t in sorted(provider.quality_flags) for f in provider.quality_flags[t]))
+    _write(directory / "risk_free.csv", RATE_COLUMNS, ([d.isoformat(), _format(r)] for d, r in provider.risk_free))
+    _write(directory / "benchmark.csv", BENCHMARK_COLUMNS,
+           ([d.isoformat(), _format(level)] for d, level in provider.benchmark))
     (directory / "dataset.json").write_text(json.dumps(provider.metadata, indent=2, sort_keys=True, default=str) + "\n",
                                             encoding="utf-8")
 

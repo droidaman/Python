@@ -101,10 +101,14 @@ class JsonClient:
 
     def get_json(self, url: str, max_age: float = 0.0):
         """Parsed JSON, or None for 404. Retries 429/5xx and network errors with backoff."""
+        body = self.get_bytes(url, max_age)
+        return None if body is None else json.loads(body)
+
+    def get_bytes(self, url: str, max_age: float = 0.0) -> bytes | None:
         if self.cache is not None and max_age > 0:
             cached = self.cache.get(url, max_age, self._clock())
             if cached is not None:
-                return json.loads(cached)
+                return cached
         for attempt in range(self.retries + 1):
             self.limiter.wait()
             try:
@@ -115,10 +119,9 @@ class JsonClient:
                 self._sleep(2 ** attempt)
                 continue
             if status == 200:
-                data = json.loads(body)
                 if self.cache is not None:
                     self.cache.put(url, body, self._clock())
-                return data
+                return body
             if status == 404:
                 return None
             if status in RETRYABLE_STATUS and attempt < self.retries:
