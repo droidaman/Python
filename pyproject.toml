@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "babylon-value"
+version = "0.1.0"
+description = "A fail-closed, rules-based deep value equity strategy built on The Richest Man in Babylon"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+babylon-value = "babylon_value.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["babylon_value*"]
