@@ -38,7 +38,10 @@ def ratio(numerator, denominator, what: str) -> float:
 # --- Valuation ---------------------------------------------------------------
 
 def market_cap(snap: "SecuritySnapshot") -> float:
-    return finite(snap.market.price, "price") * finite(snap.latest.shares_outstanding, "shares outstanding")
+    shares = snap.market.shares_outstanding
+    if shares is None:
+        shares = snap.latest.shares_outstanding
+    return finite(snap.market.price, "price") * finite(shares, "shares outstanding")
 
 
 def enterprise_value(snap: "SecuritySnapshot") -> float:

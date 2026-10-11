@@ -6,3 +6,7 @@ dist/
 .venv/
 *.jsonl
 /data/
+.cache/
+journal/
+paper_ledger.json*
+KILL_SWITCH

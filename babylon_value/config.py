@@ -40,6 +40,7 @@ class CompetenceConfig:
 
     allowed_security_types: frozenset = frozenset({"common_stock"})
     allowed_exchanges: frozenset = frozenset({"NYSE", "NASDAQ", "NYSE American"})
+    allowed_countries: frozenset = frozenset({"US"})   # headquarters country
     # EV/EBIT, current ratio and Altman Z are meaningless for banks, insurers,
     # REITs and regulated utilities; Greenblatt and Carlisle exclude them too.
     excluded_sectors: frozenset = frozenset({"Financials", "Real Estate", "Utilities"})
@@ -131,7 +132,7 @@ class GovernanceConfig:
 
 @dataclass(frozen=True)
 class StrategyConfig:
-    version: str = "1.0.0"
+    version: str = "1.1.0"
     integrity: IntegrityConfig = field(default_factory=IntegrityConfig)
     competence: CompetenceConfig = field(default_factory=CompetenceConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)

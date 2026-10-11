@@ -1,7 +1,7 @@
 """Monthly, point-in-time backtester.
 
-Each month-end: credit dividends (Cure 3 - they are reinvested at the next
-rebalance), add the periodic contribution (Law 1 - a part of all you earn is
+Each month-end: apply stock splits to holdings, credit dividends (Cure 3 -
+they are reinvested at the next rebalance), add the periodic contribution (Law 1 - a part of all you earn is
 yours to keep), close any holding that has been delisted at its last price
 less a haircut (survivorship bias - Shumway, 1997, finds delisting returns
 around -30%), rebalance on the configured months and mark to market.
@@ -14,7 +14,7 @@ from __future__ import annotations
 import math
 import statistics
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from typing import Callable
 
 from .config import StrategyConfig
@@ -77,6 +77,11 @@ def run_backtest(
     journal: Journal | None = None,
 ) -> BacktestResult:
     config.validate()
+    metadata = getattr(provider, "metadata", {})
+    if metadata.get("purpose") == "live" or metadata.get("price_basis") == "split_adjusted":
+        raise ValueError("this dataset's prices are split-adjusted to its build date, so historical market caps "
+                         "would be wrong around every split; it is for live trading only. Backtests need "
+                         "unadjusted prices plus a splits file.")
     if not 0.0 <= delisting_haircut <= 1.0:
         raise ValueError("delisting_haircut must be in [0, 1]")
     broker = PaperBroker(initial_cash, CostModel(config.costs))
@@ -91,10 +96,7 @@ def run_backtest(
     for current in dates:
         flow = 0.0
         if previous is not None:
-            for ticker, position in sorted(broker.positions().items()):
-                per_share = provider.dividends(ticker, previous, current)
-                if per_share > 0:
-                    broker.deposit(position.shares * per_share)
+            _apply_corporate_actions(broker, provider, previous, current)
             if monthly_contribution > 0:
                 broker.deposit(monthly_contribution)
                 flow = monthly_contribution
@@ -171,14 +173,47 @@ def equal_weight_benchmark(provider, delisting_haircut: float = 0.30, max_price_
             last = provider.price(ticker, end)
             if first is None or last is None or first.close <= 0:
                 continue
-            dividends = provider.dividends(ticker, start, end)
+            shares, cash = 1.0, 0.0
+            cursor = start
+            for split in _splits(provider, ticker, start, end):
+                cash += shares * provider.dividends(ticker, cursor, split.ex_date - timedelta(days=1))
+                shares *= split.ratio
+                cursor = split.ex_date - timedelta(days=1)
+            cash += shares * provider.dividends(ticker, cursor, end)
             closing = last.close
             if (end - last.date).days > max_price_age_days:
                 closing *= 1 - delisting_haircut
-            returns.append((closing + dividends) / first.close - 1)
+            returns.append((shares * closing + cash) / first.close - 1)
         return statistics.fmean(returns) if returns else None
 
     return period_return
+
+
+def _splits(provider, ticker: str, start: date, end: date):
+    splits = getattr(provider, "splits", None)
+    return splits(ticker, start, end) if splits else []
+
+
+def _apply_corporate_actions(broker: PaperBroker, provider, start: date, end: date) -> None:
+    """Splits and dividends for each holding in (start, end], in date order.
+    A dividend on a split's ex-date is per post-split share."""
+    for ticker in sorted(broker.positions()):
+        cursor = start
+        for split in _splits(provider, ticker, start, end):
+            _credit_dividends(broker, provider, ticker, cursor, split.ex_date - timedelta(days=1))
+            bar = provider.price(ticker, end)
+            broker.apply_split(ticker, split.ratio, bar.close if bar is not None else 0.0)
+            cursor = split.ex_date - timedelta(days=1)
+        _credit_dividends(broker, provider, ticker, cursor, end)
+
+
+def _credit_dividends(broker: PaperBroker, provider, ticker: str, start: date, end: date) -> None:
+    position = broker.positions().get(ticker)
+    if position is None or end <= start:
+        return
+    per_share = provider.dividends(ticker, start, end)
+    if per_share > 0:
+        broker.deposit(position.shares * per_share)
 
 
 def _max_drawdown(returns: list[float]) -> float:

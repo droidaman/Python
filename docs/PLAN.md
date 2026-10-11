@@ -34,7 +34,7 @@ in the journal carries that label.
 | 1 | Gold comes gladly to the man who puts by not less than one-tenth of his earnings | Periodic contributions are part of the strategy. The backtester models monthly deposits, and contributions are deployed only through the same gates. |
 | 2 | Gold labours diligently for the owner who finds it profitable employment | **Earnings yield hurdle:** EBIT/EV must be at least 2× the risk-free rate (Graham). If a safe bond pays nearly as much, the gold is not "profitably employed". Idle cash above the reserve is put to work at each rebalance. |
 | 3 | Gold clings to the cautious owner who invests under the advice of men wise in its handling | Rules come from published, peer-reviewed research, not tips: **Piotroski F-score ≥ 6** filters value traps; Altman and Beneish screens guard the downside. |
-| 4 | Gold slips away from the man who invests in businesses he is not familiar with | **Circle of competence:** ordinary shares on major exchanges only; banks, insurers, REITs and utilities excluded (EV/EBIT and the current ratio don't apply to them); minimum revenue; no unclassified businesses. |
+| 4 | Gold slips away from the man who invests in businesses he is not familiar with | **Circle of competence:** ordinary shares of US-headquartered companies on NYSE, NASDAQ or NYSE American; banks, insurers, REITs and utilities excluded (EV/EBIT and the current ratio don't apply to them); minimum revenue; no unclassified businesses. |
 | 5 | Gold flees the man who forces it to impossible earnings or follows tricksters | **No tricksters:** Beneish M-score ≤ −1.78 (earnings manipulation), share dilution ≤ 5%/yr, dividend yield ≤ 10% and covered by free cash flow, no penny stocks (price ≥ $2, market cap ≥ $50M). No leverage, options or shorting, ever. |
 
 ### The Seven Cures for a Lean Purse
@@ -99,7 +99,11 @@ flowchart TD
 | `execution.py` | `Broker` protocol and `PaperBroker`. |
 | `engine.py` | One rebalance with pre-flight checks and circuit breakers. |
 | `backtest.py` | Monthly point-in-time backtester and performance and alpha metrics. |
-| `data/` | Provider protocol, in-memory provider, CSV loader, synthetic generator. |
+| `data/` | Provider protocol (splits, share counts, quality flags), CSV format, synthetic generator. |
+| `data/edgar.py` | SEC EDGAR client and XBRL → point-in-time annual reports (§12). |
+| `data/live.py` | Builds the live dataset from EDGAR + IB prices, with split-safety flags (§12). |
+| `ibkr.py` | Interactive Brokers paper-only broker, ledger and gateway over `ib_async` (§12). |
+| `net.py` | Rate-limited, retrying, cached HTTPS JSON client (standard library). |
 | `journal.py` | Append-only JSON Lines decision journal. |
 
 **Language choice: Python, standard library only.** The strategy rebalances quarterly over a few
@@ -145,9 +149,10 @@ Design rules that make the gates failsafe:
 
 ```
 entry = AND[short-circuit](
-  data_integrity      point_in_time · history_depth(5y) · completeness · freshness · accounting_identity
+  data_integrity      point_in_time · data_quality · history_depth(5y) · completeness · freshness ·
+                      accounting_identity
   investment_case = AND(
-    circle_of_competence   security_type · exchange · sector · established_business      (Law 4)
+    circle_of_competence   security_type · exchange · country · sector · established_business (Law 4)
     guard_thy_treasure     altman_z · liquidity · leverage · earnings_stability ·
                            tangible_backing                                             (Cure 4, Cure 5)
     no_tricksters          beneish_m_score · dilution · dividend_sustainability ·
@@ -161,11 +166,13 @@ entry = AND[short-circuit](
 | Gate | Rule (default) | Source |
 |---|---|---|
 | point_in_time | every report's `available_date` and the price date ≤ decision date, else **halt** | bias control |
+| data_quality | no open data-quality flag (e.g. a share count that may predate a split, §12) | failsafe |
 | history_depth | ≥ 5 consecutive annual reports | Graham |
 | completeness | every field finite, correct sign, assets & shares > 0 | failsafe |
 | freshness | price ≤ 7 days old; latest annual report ≤ 456 days old | failsafe |
 | accounting_identity | assets = liabilities + equity (±2%); components ≤ totals | failsafe |
 | security_type / exchange | common stock on NYSE, NASDAQ, NYSE American | Law 4 |
+| country | headquarters in the US | Law 4 |
 | sector | not Financials, Real Estate, Utilities, or unclassified | Law 4; Greenblatt |
 | established_business | revenue ≥ $50M | Law 4 |
 | altman_z | Z ≥ 1.81 | Altman (1968) |
@@ -237,7 +244,8 @@ caps.
   (sizing and gates disagreeing means there is a defect).
 * **Config validation:** the engine refuses to start on an unsafe configuration (e.g. < 10 positions,
   exit threshold not looser than entry, reserve > 50%).
-* **Paper trading only** in this release; a live broker adapter is a later phase behind human approval.
+* **Paper trading only.** The Interactive Brokers adapter refuses any account that isn't a paper account
+  (§12); there is no live-trading switch.
 
 ## 8. Bias controls
 
@@ -273,19 +281,82 @@ caps.
 | Phase | Deliverable | Status |
 |---|---|---|
 | 0 | This plan | done |
-| 1 | Core engine: gates, ranking, exits, order gates, paper broker, backtester, journal, CSV/synthetic data, tests | **done (this commit)** |
-| 2 | Real data adapters: EDGAR XBRL fundamentals with filing dates, a price source with delistings, data-quality report | next |
-| 3 | Research validation per §9; written report | |
-| 4 | Paper trading service: scheduler, alerts for FREEZE/HALT, daily reconciliation | |
-| 5 | Live broker adapter (e.g. Interactive Brokers or Alpaca) behind human approval; tax-lot awareness | |
+| 1 | Core engine: gates, ranking, exits, order gates, paper broker, backtester, journal, CSV/synthetic data, tests | done |
+| 2 | SEC EDGAR fundamentals (point-in-time) + Interactive Brokers paper trading, with split-safety checks (§12) | **done** |
+| 3 | Research validation per §9. Needs a historical price source with unadjusted prices, splits and delisted stocks; IB provides none of these (§12) | next: choose a price source |
+| 4 | Paper trading for 6–12 months: scheduled runs, alerts for FREEZE/HALT, monthly review of the journal | can start now, in parallel with Phase 3 |
+| 5 | Live trading behind human approval of each order batch; tax-lot awareness | after Phases 3 and 4 |
 
 ## 11. Known limitations
 
-* Annual data only; using quarterly (TTM) data would react faster but needs more careful handling of
-  restatements and fiscal calendars.
+* Annual data only (plus quarterly share counts); using quarterly (TTM) earnings would react faster but needs
+  more careful handling of restatements and fiscal calendars.
+* XBRL tagging varies between companies. Where the tags this adapter knows are missing, the company is rejected
+  rather than guessed at, so some sound companies are excluded. The coverage report from `build-dataset` shows
+  how many and why.
 * The US-centric defaults (exchanges, sectors) need adjusting for other markets.
 * Taxes aren't modelled; holding past one year would often be preferable in a taxable account.
 * The synthetic market assumes mean reversion, so it validates the mechanics only. It is **not
   evidence** of alpha.
 * Small, cheap companies can stay cheap or get cheaper for years. The rules accept that cost as the
   price of the strategy's edge.
+
+## 12. Data and execution: SEC EDGAR + Interactive Brokers (Phase 2)
+
+### Fundamentals: SEC EDGAR (`data/edgar.py`)
+
+* **Sources:** `company_tickers_exchange.json` (ticker, CIK, exchange), `submissions/CIK…json` (SIC code →
+  sector, business address → country, entity type) and `api/xbrl/companyfacts/CIK…json` (every XBRL fact
+  filed). Free. The SEC requires a User-Agent with your name and email and allows at most 10 requests per
+  second. The client sends the User-Agent, runs at 8 requests per second, retries 429/5xx with backoff, and
+  caches responses on disk for a day.
+* **Point in time:** every fact records its filing date. Each 10-K (and each later 10-K that restates the
+  year as a comparative, and each 10-K/A) creates a new *version* of that fiscal year, visible only from its
+  filing date.
+* **Tag mapping:** documented tag lists in priority order. Missing required items stay missing (the company
+  is rejected). Debt takes the larger of overlapping readings. Interest is assumed zero only when there is no
+  debt. Conflicting values within one filing are treated as missing. Only USD and annual (350–380 day)
+  durations are used, so quarterly figures never leak into annual ones.
+* **Share counts:** the cover page of every 10-K and 10-Q gives a fresher count than the annual balance
+  sheet, so market cap uses the latest one. A filing with several different counts (multiple share classes)
+  is skipped rather than guessed at.
+
+### Prices: Interactive Brokers
+
+IB's daily TRADES bars cover current listings. They are **adjusted for splits up to today** and include no
+dividend history and no delisted stocks. That's fine for trading today, but it has two consequences:
+
+1. **Market caps around splits.** Today's price is on today's share basis, while SEC share counts are on the
+   basis of their filing date. After a split, market cap would be wrong by the split ratio, and a 3-for-1
+   split would make a company look three times cheaper. Three checks raise **data-quality flags**, which
+   block buying and freeze any holding until the flag clears:
+   * *Public float:* the 10-K reports the market value of the free float on a stated date. IB price × latest
+     share count on that date can't be meaningfully below it (the float is only part of all shares). If it
+     is, the share count probably predates a split. This catches most forward splits; it can miss a 2-for-1
+     split in a company whose insiders own over ~40%.
+   * *Price revisions:* each rebuild compares IB's prices for dates already stored. If they changed, IB
+     re-adjusted for a new split. The flag stays open until the company files a newer share count.
+   * *Unexplained jumps:* a 3× day-over-day move.
+2. **No backtests on IB data.** A dataset built from IB prices is marked `purpose: live` and the backtester
+   refuses it. Phase 3 needs a source with unadjusted prices, splits and delisted stocks (e.g. Norgate Data,
+   Sharadar via Nasdaq Data Link, or CRSP) loaded into the CSV format, including `splits.csv`. The engine
+   already handles splits correctly in backtests: share counts are rescaled to each date's basis, and
+   holdings split with cash in lieu.
+
+To keep IB request volumes reasonable, `build-dataset` evaluates every gate that needs no market data first
+and requests prices only for the survivors and current holdings. A company that fails those gates would fail
+the full pipeline too, so this skips work without changing any decision.
+
+### Execution: Interactive Brokers paper account (`ibkr.py`)
+
+| Safeguard | Behaviour |
+|---|---|
+| Paper only | Refuses any account whose ID doesn't start with "D" (IB paper accounts). No live switch exists. |
+| Ledger reconciliation | The strategy keeps a ledger of what it owns. Any unexplained position (a manual trade, a split, an option, a short, a fractional share) halts the run until `reconcile` is used. Position reports that trail a fill are re-checked for a few seconds first. |
+| No duplicate orders | Each order carries a deterministic reference (date, side, ticker, shares); one that already executed today is never sent again. |
+| No dangling orders | A run won't start while any order is open; unfilled day-limit orders are cancelled after 2 minutes, and partial fills are recorded. |
+| Market hours | Orders are sent only in the regular session (9:30–15:50 New York time). |
+| Limit prices | Rounded to the exchange tick in the safe direction (buys down, sells up). |
+| Calendar | `paper-trade` refuses to send orders outside the rebalance months; `--dry-run` previews at any time. |
+| Freshness | `paper-trade` refuses a dataset older than one day. |
+| Kill switch | If the file `KILL_SWITCH` exists, the run halts before anything is sent. |

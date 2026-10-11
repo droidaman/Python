@@ -8,6 +8,7 @@ buy the cash balance cannot pay for, independently of the order gates.
 from __future__ import annotations
 
 import dataclasses
+import math
 from dataclasses import dataclass
 from datetime import date
 from typing import Protocol
@@ -48,6 +49,9 @@ class Fill:
 
 
 class Broker(Protocol):
+    def preflight(self, as_of: date) -> None:
+        """Raise HaltError if the account is not in a state that is safe to trade."""
+
     def cash(self) -> float: ...
 
     def positions(self) -> dict[str, Position]: ...
@@ -67,6 +71,9 @@ class PaperBroker:
         self._costs = cost_model
         self.fills: list[Fill] = []
         self.rejections: list[tuple[Order, str]] = []
+
+    def preflight(self, as_of: date) -> None:
+        pass
 
     def cash(self) -> float:
         return self._cash
@@ -120,6 +127,23 @@ class PaperBroker:
         fill = Fill(ticker, Side.SELL, existing.shares, price, price, commission, as_of)
         self.fills.append(fill)
         return fill
+
+    def apply_split(self, ticker: str, ratio: float, price_after: float) -> None:
+        """Apply a stock split; a fractional share is paid out as cash in lieu."""
+        existing = self._positions.get(ticker)
+        if existing is None:
+            return
+        if not is_finite_number(ratio) or ratio <= 0:
+            raise ValueError(f"invalid split ratio {ratio!r} for {ticker}")
+        exact = existing.shares * ratio
+        whole = math.floor(exact + 1e-9)
+        price_after = price_after if is_finite_number(price_after) and price_after > 0 else 0.0
+        self._cash += (exact - whole) * price_after
+        if whole <= 0:
+            del self._positions[ticker]
+        else:
+            self._positions[ticker] = dataclasses.replace(
+                existing, shares=whole, cost_basis=existing.cost_basis * whole / exact)
 
     def _reduce(self, position: Position, shares: int) -> None:
         remaining = position.shares - shares

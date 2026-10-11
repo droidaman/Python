@@ -48,20 +48,38 @@ class HistoryDepthGate(LeafGate):
         return Verdict(True, f"{need} consecutive annual reports", {"years": have})
 
 
+class DataQualityGate(LeafGate):
+    """Problems the data pipeline found (e.g. a share count that may predate a
+    stock split) block buying and freeze holdings until they are resolved."""
+
+    name = "data_quality"
+    principle = Principle.INTEGRITY
+
+    def check(self, snap, ctx):
+        if snap.quality_flags:
+            return Verdict(False, "; ".join(snap.quality_flags), {"flags": len(snap.quality_flags)})
+        return Verdict(True, "no data-quality flags")
+
+
 class CompletenessGate(LeafGate):
     """Every required field must be present, finite and of the right sign.
     Missing values are never filled with zeros or guesses."""
 
     name = "completeness"
     principle = Principle.INTEGRITY
+    check_market = True
 
     def check(self, snap, ctx):
         depth = ctx.config.integrity.min_history_years
         problems: list[str] = []
-        if not is_finite_number(snap.market.price) or snap.market.price <= 0:
-            problems.append("price")
-        if not is_finite_number(snap.market.avg_daily_dollar_volume) or snap.market.avg_daily_dollar_volume < 0:
-            problems.append("average daily dollar volume")
+        if self.check_market:
+            if not is_finite_number(snap.market.price) or snap.market.price <= 0:
+                problems.append("price")
+            if not is_finite_number(snap.market.avg_daily_dollar_volume) or snap.market.avg_daily_dollar_volume < 0:
+                problems.append("average daily dollar volume")
+            shares = snap.market.shares_outstanding
+            if shares is not None and (not is_finite_number(shares) or shares <= 0):
+                problems.append("latest share count")
         for years_back, period in enumerate(snap.history[:depth]):
             for field_name in NUMERIC_FIELDS:
                 value = getattr(period, field_name)
@@ -81,21 +99,36 @@ class CompletenessGate(LeafGate):
         return Verdict(True, "all required fields present and valid")
 
 
+class ReportCompletenessGate(CompletenessGate):
+    """Completeness of the annual reports alone, for screening before prices are fetched."""
+
+    name = "report_completeness"
+    check_market = False
+
+
 class FreshnessGate(LeafGate):
     name = "freshness"
     principle = Principle.INTEGRITY
+    check_price = True
 
     def check(self, snap, ctx):
         cfg = ctx.config.integrity
         price_age = (ctx.as_of - snap.market.as_of).days
         filing_age = (ctx.as_of - snap.latest.available_date).days
         metrics = {"price_age_days": price_age, "filing_age_days": filing_age}
-        if price_age > cfg.max_price_age_days:
+        if self.check_price and price_age > cfg.max_price_age_days:
             return Verdict(False, f"price is {price_age} days old (max {cfg.max_price_age_days})", metrics)
         if filing_age > cfg.max_filing_age_days:
             return Verdict(False, f"latest annual report is {filing_age} days old (max {cfg.max_filing_age_days})",
                            metrics)
         return Verdict(True, "price and annual report are current", metrics)
+
+
+class FilingFreshnessGate(FreshnessGate):
+    """Freshness of the annual report alone, for screening before prices are fetched."""
+
+    name = "filing_freshness"
+    check_price = False
 
 
 class AccountingIdentityGate(LeafGate):

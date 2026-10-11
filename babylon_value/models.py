@@ -77,6 +77,9 @@ class MarketData:
     as_of: date                     # date of the price observation
     price: float
     avg_daily_dollar_volume: float
+    # Latest reported share count (e.g. a 10-Q cover page), on the same basis
+    # as ``price``. When absent, the latest annual report's count is used.
+    shares_outstanding: float | None = None
 
 
 @dataclass(frozen=True)
@@ -84,6 +87,7 @@ class SecuritySnapshot:
     profile: SecurityProfile
     market: MarketData
     history: tuple[FinancialPeriod, ...]   # most recent fiscal year first
+    quality_flags: tuple[str, ...] = ()    # data problems found by the data pipeline
 
     @property
     def ticker(self) -> str:

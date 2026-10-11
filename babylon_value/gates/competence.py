@@ -31,6 +31,18 @@ class ExchangeGate(LeafGate):
         return Verdict(allowed, f"listed on {exchange!r}" + ("" if allowed else ", which is not an allowed exchange"))
 
 
+class CountryGate(LeafGate):
+    """US companies only: US accounting, US courts, US disclosure rules."""
+
+    name = "country"
+    principle = Principle.LAW_4
+
+    def check(self, snap, ctx):
+        country = snap.profile.country
+        allowed = country in ctx.config.competence.allowed_countries
+        return Verdict(allowed, f"headquartered in {country!r}" + ("" if allowed else ", outside the allowed countries"))
+
+
 class SectorGate(LeafGate):
     """Banks, insurers, REITs and utilities cannot be judged with the tools
     used here (EV/EBIT, current ratio, Altman Z), so they are left alone."""

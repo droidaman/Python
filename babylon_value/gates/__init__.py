@@ -23,9 +23,10 @@ from __future__ import annotations
 
 from ..logic import AllOf, GateResult
 from ..principles import Principle
-from .competence import EstablishedBusinessGate, ExchangeGate, SectorGate, SecurityTypeGate
+from .competence import CountryGate, EstablishedBusinessGate, ExchangeGate, SectorGate, SecurityTypeGate
 from .costs import TradabilityGate
-from .integrity import AccountingIdentityGate, CompletenessGate, FreshnessGate, HistoryDepthGate, PointInTimeGate
+from .integrity import AccountingIdentityGate, CompletenessGate, DataQualityGate, FilingFreshnessGate, FreshnessGate, \
+    HistoryDepthGate, PointInTimeGate, ReportCompletenessGate
 from .safety import AltmanZGate, EarningsStabilityGate, LeverageGate, LiquidityGate, TangibleBackingGate
 from .tricksters import BeneishGate, DilutionGate, DividendSustainabilityGate, PennyStockGate
 from .value import PiotroskiGate, margin_of_safety_gate
@@ -51,13 +52,14 @@ STAGE_ORDER = (
 
 def integrity_stage() -> AllOf:
     return AllOf(DATA_INTEGRITY, Principle.INTEGRITY, [
-        PointInTimeGate(), HistoryDepthGate(), CompletenessGate(), FreshnessGate(), AccountingIdentityGate(),
+        PointInTimeGate(), DataQualityGate(), HistoryDepthGate(), CompletenessGate(), FreshnessGate(),
+        AccountingIdentityGate(),
     ], short_circuit=True)
 
 
 def competence_stage() -> AllOf:
     return AllOf(CIRCLE_OF_COMPETENCE, Principle.LAW_4, [
-        SecurityTypeGate(), ExchangeGate(), SectorGate(), EstablishedBusinessGate(),
+        SecurityTypeGate(), ExchangeGate(), CountryGate(), SectorGate(), EstablishedBusinessGate(),
     ])
 
 
@@ -91,6 +93,29 @@ def build_entry_pipeline() -> AllOf:
 def build_thesis_pipeline() -> AllOf:
     intact = AllOf(THESIS_INTACT, Principle.ALL, [competence_stage(), safety_stage(), trickster_stage()])
     return AllOf("thesis", Principle.ALL, [integrity_stage(), intact], short_circuit=True)
+
+
+def profile_stage() -> AllOf:
+    """The circle-of-competence checks that need only the company profile."""
+    return AllOf("profile", Principle.LAW_4, [SecurityTypeGate(), ExchangeGate(), CountryGate(), SectorGate()])
+
+
+def build_fundamental_prefilter() -> AllOf:
+    """Every entry gate that needs no market data. A security that fails here
+    would fail the entry pipeline too, so the data pipeline skips fetching
+    its prices. This only saves work; it never changes a decision."""
+    integrity = AllOf(DATA_INTEGRITY, Principle.INTEGRITY, [
+        HistoryDepthGate(), ReportCompletenessGate(), FilingFreshnessGate(), AccountingIdentityGate(),
+    ], short_circuit=True)
+    case = AllOf(INVESTMENT_CASE, Principle.ALL, [
+        AllOf(CIRCLE_OF_COMPETENCE, Principle.LAW_4, [profile_stage(), EstablishedBusinessGate()]),
+        AllOf(GUARD_THY_TREASURE, Principle.CURE_4, [
+            LiquidityGate(), LeverageGate(), EarningsStabilityGate(), TangibleBackingGate(),
+        ]),
+        AllOf(NO_TRICKSTERS, Principle.LAW_5, [BeneishGate(), DilutionGate()]),
+        AllOf(PROFITABLE_EMPLOYMENT, Principle.LAW_3, [PiotroskiGate()]),
+    ])
+    return AllOf("fundamental_prefilter", Principle.ALL, [integrity, case], short_circuit=True)
 
 
 def first_failing_stage(result: GateResult) -> str:

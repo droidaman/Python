@@ -12,7 +12,7 @@ from .execution import PaperBroker
 from .gates import build_entry_pipeline, build_thesis_pipeline
 from .logic import EvaluationContext, GateResult, LookAheadBiasError, Outcome
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "BacktestResult",

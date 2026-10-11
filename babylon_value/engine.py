@@ -28,6 +28,7 @@ from typing import Callable
 from .config import StrategyConfig
 from .costs import CostModel
 from .data.provider import DataProvider
+from .errors import HaltError
 from .execution import Broker, Fill
 from .exits import ExitAction, ExitDecision, evaluate_holding
 from .gates import STAGE_ORDER, build_entry_pipeline, build_thesis_pipeline
@@ -39,10 +40,6 @@ from .portfolio import PortfolioState
 from .principles import Principle
 from .ranking import RankedCandidate
 from .screening import screen
-
-
-class HaltError(RuntimeError):
-    """A safety check failed; no further orders are sent in this run."""
 
 
 class RunStatus(Enum):
@@ -213,6 +210,7 @@ class Rebalancer:
         rf = ctx.risk_free_rate
         if not is_finite_number(rf) or not 0.0 <= rf <= 0.20:
             raise HaltError(f"implausible risk-free rate {rf!r} (expected 0 to 0.20; use 0 when rates are negative)")
+        self.broker.preflight(ctx.as_of)   # account state, open orders, ledger reconciliation
 
     def _universe(self, as_of: date) -> list[str]:
         universe = sorted(set(self.provider.universe(as_of)))
