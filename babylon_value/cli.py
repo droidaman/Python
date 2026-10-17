@@ -56,6 +56,7 @@ def main(argv: list[str] | None = None) -> int:
                       help="monthly contribution (Law 1: at least a tenth of what you earn)")
     demo.add_argument("--risk-free", type=float, default=0.04)
     demo.add_argument("--journal", help="write the decision journal (JSON Lines) to this path")
+    demo.add_argument("--report", help="write an HTML report to this path")
 
     for name, text in (("screen", "rank the securities that pass every gate"),
                        ("explain", "show every gate verdict for one security")):
@@ -79,6 +80,7 @@ def main(argv: list[str] | None = None) -> int:
     backtest.add_argument("--delisting-haircut", type=float, default=0.30,
                           help="loss applied when a holding delists (default 0.30; also try 0 to bracket the result)")
     backtest.add_argument("--journal")
+    backtest.add_argument("--report", help="write an HTML report to this path")
 
     history = commands.add_parser("build-history", help="build a backtest dataset from SEC EDGAR and Norgate Data")
     history.add_argument("--out", default="data/history")
@@ -163,6 +165,11 @@ def _demo(args, config: StrategyConfig) -> int:
     print(SYNTHETIC_WARNING)
     print()
     print(result.summary())
+    if args.report:
+        _write_report(args.report, result, "Babylon Value backtest - SYNTHETIC data", [
+            "Synthetic market: prices revert to fair value by construction. This shows the machinery works; "
+            "it is not evidence of alpha.", f"Seed {args.seed}, {args.companies} fictional companies."],
+            "Equal-weight universe")
     print()
     print("Most recent rebalance:")
     print(result.reports[-1].summary())
@@ -226,6 +233,12 @@ def _backtest(args, config: StrategyConfig) -> int:
         return 1
     print(result.summary())
     coverage = provider.metadata.get("delisted_coverage")
+    if args.report:
+        notes = [f"Dataset: {args.data}; delisting haircut {args.delisting_haircut:.0%}."]
+        if coverage is not None:
+            notes.append(f"Delisted stocks covered by the dataset: {coverage:.0%}; missing ones can flatter results.")
+        _write_report(args.report, result, "Babylon Value backtest", notes,
+                      provider.metadata.get("sources", {}).get("benchmark", "Equal-weight universe"))
     if coverage is not None:
         print(f"  Delisted stocks covered by the dataset: {coverage:.0%}"
               + ("" if coverage >= 0.9 else " - the rest are missing, which can flatter these results"))
@@ -358,3 +371,10 @@ def _reconcile(args, config: StrategyConfig) -> int:
         ledger.save(entries)
         print("positions that exist on only one side were left for you to resolve by hand")
     return 2
+
+
+def _write_report(path, result, title, notes, benchmark_name) -> None:
+    from .report import render_html
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text(render_html(result, title, notes, benchmark_name), encoding="utf-8")
+    print(f"report written to {path}")
